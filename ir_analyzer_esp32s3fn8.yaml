@@ -1,0 +1,352 @@
+esphome:
+  name: ir-analyzer-s3fn8
+  friendly_name: IR Analyzer ESP32-S3FN8
+  comment: Standalone IR receiver and transmitter for ESP32-S3FN8 board
+  on_boot:
+    priority: -10
+    then:
+      - logger.log: 
+          format: "═══════════════════════════════════════════════════"
+          level: INFO
+      - logger.log:
+          format: "🚀 ESP32-S3FN8 IR Analyzer Started"
+          level: INFO  
+      - logger.log:
+          format: "📡 IR RX: GPIO1 | IR TX: GPIO2 (SWAPPED)"
+          level: INFO
+      - logger.log:
+          format: "═══════════════════════════════════════════════════"
+          level: INFO
+
+esp32:
+  board: m5stack-atoms3
+  variant: esp32s3
+  framework:
+    type: arduino
+
+# 日志配置 - USB CDC串口输出
+logger:
+  level: DEBUG
+  hardware_uart: USB_CDC
+  logs:
+    component: ERROR
+    sensor: INFO
+
+# 禁用WiFi - 纯本地运行
+wifi:
+  manual_ip:
+    static_ip: 192.168.1.99
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+  ssid: "dummy_ssid"
+  password: "dummy12345"
+  enable_on_boot: false
+
+# 全局变量存储统计信息
+globals:
+  - id: total_signals_received
+    type: int
+    initial_value: '0'
+  - id: last_nec_address
+    type: uint16_t
+    initial_value: '0'
+  - id: last_nec_command
+    type: uint16_t  
+    initial_value: '0'
+  # 存储最后接收的原始IR数据（海尔电视遥控器）
+  - id: last_raw_data
+    type: std::vector<int32_t>
+    restore_value: false
+  - id: has_raw_data
+    type: bool
+    initial_value: 'false'
+  # 标记是否正在发送（用于区分自己发送的信号）
+  - id: is_transmitting
+    type: bool
+    initial_value: 'false'
+
+# 红外接收器配置 - GPIO1 (对调测试)
+remote_receiver:
+  id: ir_receiver
+  pin: 
+    number: GPIO1
+    mode:
+      input: true
+      pullup: true
+  dump: all  # 开启所有协议的自动dump，便于调试
+  tolerance: 30%  # 增加容差以匹配更多协议变种
+  filter: 50us
+  idle: 4ms
+  buffer_size: 10kb
+  
+  # NEC协议处理
+  on_nec:
+    then:
+      - lambda: |-
+          id(total_signals_received) += 1;
+          id(last_nec_address) = x.address;
+          id(last_nec_command) = x.command;
+          
+          ESP_LOGI("IR-NEC", "╔══════════════════════════════════════╗");
+          ESP_LOGI("IR-NEC", "║         NEC Protocol Detected        ║");
+          ESP_LOGI("IR-NEC", "╠══════════════════════════════════════╣");
+          ESP_LOGI("IR-NEC", "║ Address : 0x%04X                    ║", x.address);
+          ESP_LOGI("IR-NEC", "║ Command : 0x%04X                    ║", x.command);
+          ESP_LOGI("IR-NEC", "╚══════════════════════════════════════╝");
+
+  # Samsung协议处理
+  on_samsung:
+    then:
+      - lambda: |-
+          id(total_signals_received) += 1;
+          
+          ESP_LOGI("IR-Samsung", "╔══════════════════════════════════════╗");
+          ESP_LOGI("IR-Samsung", "║      Samsung Protocol Detected       ║");
+          ESP_LOGI("IR-Samsung", "╠══════════════════════════════════════╣");
+          ESP_LOGI("IR-Samsung", "║ Data    : 0x%08X              ║", x.data);
+          ESP_LOGI("IR-Samsung", "╚══════════════════════════════════════╝");
+
+  # Sony协议处理
+  on_sony:
+    then:
+      - lambda: |-
+          id(total_signals_received) += 1;
+          
+          ESP_LOGI("IR-Sony", "╔══════════════════════════════════════╗");
+          ESP_LOGI("IR-Sony", "║        Sony Protocol Detected        ║");
+          ESP_LOGI("IR-Sony", "╠══════════════════════════════════════╣");
+          ESP_LOGI("IR-Sony", "║ Data    : 0x%08X              ║", x.data);
+          ESP_LOGI("IR-Sony", "║ Bits    : %d                         ║", x.nbits);
+          ESP_LOGI("IR-Sony", "╚══════════════════════════════════════╝");
+
+  # RC5协议处理
+  on_rc5:
+    then:
+      - lambda: |-
+          id(total_signals_received) += 1;
+          
+          ESP_LOGI("IR-RC5", "╔══════════════════════════════════════╗");
+          ESP_LOGI("IR-RC5", "║       RC5 Protocol Detected          ║");
+          ESP_LOGI("IR-RC5", "╠══════════════════════════════════════╣");
+          ESP_LOGI("IR-RC5", "║ Address : 0x%02X                      ║", x.address);
+          ESP_LOGI("IR-RC5", "║ Command : 0x%02X                      ║", x.command);
+          ESP_LOGI("IR-RC5", "╚══════════════════════════════════════╝");
+
+  # LG协议处理
+  on_lg:
+    then:
+      - lambda: |-
+          id(total_signals_received) += 1;
+          
+          ESP_LOGI("IR-LG", "╔══════════════════════════════════════╗");
+          ESP_LOGI("IR-LG", "║         LG Protocol Detected         ║");
+          ESP_LOGI("IR-LG", "╠══════════════════════════════════════╣");
+          ESP_LOGI("IR-LG", "║ Data    : 0x%08X              ║", x.data);
+          ESP_LOGI("IR-LG", "║ Bits    : %d                         ║", x.nbits);
+          ESP_LOGI("IR-LG", "╚══════════════════════════════════════╝");
+
+  # 原始信号处理 - 未知协议（海尔电视遥控器）
+  on_raw:
+    then:
+      - lambda: |-
+          if (x.size() < 10) {
+            return;
+          }
+          
+          // 如果是自己发送的信号，忽略不保存（防止波形退化）
+          if (id(is_transmitting)) {
+            ESP_LOGI("IR-RAW", "⏭️  Ignoring self-transmitted signal (preventing waveform degradation)");
+            return;
+          }
+          
+          id(total_signals_received) += 1;
+          
+          // 只保存外部遥控器信号
+          id(last_raw_data).clear();
+          for (auto val : x) {
+            id(last_raw_data).push_back(val);
+          }
+          id(has_raw_data) = true;
+          
+          ESP_LOGI("IR-RAW", "╔══════════════════════════════════════╗");
+          ESP_LOGI("IR-RAW", "║   Haier TV Remote - Raw Data Saved   ║");
+          ESP_LOGI("IR-RAW", "╠══════════════════════════════════════╣");
+          ESP_LOGI("IR-RAW", "║ Transitions: %d                      ", x.size());
+          ESP_LOGI("IR-RAW", "║ First 20 timing values (μs):         ║");
+          
+          std::string timing_str = "";
+          for (int i = 0; i < std::min((int)x.size(), 20); i++) {
+            char buf[10];
+            sprintf(buf, "%d ", x[i]);
+            timing_str += buf;
+            if ((i + 1) % 5 == 0) {
+              ESP_LOGI("IR-RAW", "║ %s", timing_str.c_str());
+              timing_str = "";
+            }
+          }
+          if (!timing_str.empty()) {
+            ESP_LOGI("IR-RAW", "║ %s", timing_str.c_str());
+          }
+          
+          // 分析引导码
+          if (x.size() > 2) {
+            int leader_high = abs(x[0]);
+            int leader_low = abs(x[1]);
+            ESP_LOGI("IR-RAW", "║ Leader: [%d μs, %d μs]", leader_high, leader_low);
+            
+            if (leader_high > 8000 && leader_high < 10000 && 
+                leader_low > 4000 && leader_low < 5000) {
+              ESP_LOGI("IR-RAW", "║ Hint: Possibly NEC-like protocol     ║");
+            }
+          }
+          
+          ESP_LOGI("IR-RAW", "║ ✅ Data stored for retransmission    ║");
+          ESP_LOGI("IR-RAW", "╚══════════════════════════════════════╝");
+
+# 红外发射器配置 - GPIO2 (对调测试)
+remote_transmitter:
+  id: ir_transmitter
+  pin: GPIO2
+  carrier_duty_percent: 50%
+
+# 脚本：异步清除发送标志（不阻塞主循环）
+script:
+  - id: clear_transmitting_flag
+    mode: restart  # 如果已在运行，重新开始
+    then:
+      - delay: 500ms
+      - lambda: |-
+          id(is_transmitting) = false;
+          ESP_LOGD("IR-TX", "✅ Transmission flag cleared, ready to receive external signals");
+
+# 按钮定义 - 用于红外发射测试
+button:
+  # 转发最后接收到的NEC码
+  - platform: template
+    name: "Transmit Last NEC Code"
+    id: transmit_last_nec
+    on_press:
+      - lambda: |-
+          if (id(last_nec_address) != 0 || id(last_nec_command) != 0) {
+            ESP_LOGI("IR-TX", "📤 Transmitting NEC: Addr=0x%04X, Cmd=0x%04X", 
+                     id(last_nec_address), id(last_nec_command));
+          } else {
+            ESP_LOGW("IR-TX", "⚠️  No NEC code stored to transmit");
+            return;
+          }
+      - remote_transmitter.transmit_nec:
+          address: !lambda 'return id(last_nec_address);'
+          command: !lambda 'return id(last_nec_command);'
+
+  # 发送测试NEC信号（电源键示例）
+  - platform: template
+    name: "Send Test Power Button"
+    on_press:
+      - logger.log: "📤 Sending test NEC signal (Power button)..."
+      - remote_transmitter.transmit_nec:
+          address: 0x00FF
+          command: 0x10EF
+
+  # 发送测试NEC信号（音量+示例）
+  - platform: template
+    name: "Send Test Volume Up"
+    on_press:
+      - logger.log: "📤 Sending test NEC signal (Volume Up)..."
+      - remote_transmitter.transmit_nec:
+          address: 0x00FF
+          command: 0x18E7
+
+# 定时统计报告和心跳检测
+interval:
+  # 每5秒重发最后接收的原始数据（海尔电视遥控器信号）
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(has_raw_data) && id(last_raw_data).size() > 0;'
+          then:
+            - logger.log:
+                format: "╔══════════════════════════════════════╗"
+                level: INFO
+                tag: IR-TX
+            - logger.log:
+                format: "║  🔁 Retransmitting Haier TV Signal   ║"
+                level: INFO
+                tag: IR-TX
+            - logger.log:
+                format: "╠══════════════════════════════════════╣"
+                level: INFO
+                tag: IR-TX
+            - lambda: |-
+                ESP_LOGI("IR-TX", "║ Transitions: %d                      ", id(last_raw_data).size());
+                ESP_LOGI("IR-TX", "╚══════════════════════════════════════╝");
+            # 发送前设置标志位（防止接收自己的信号）
+            - lambda: 'id(is_transmitting) = true;'
+            - remote_transmitter.transmit_raw:
+                carrier_frequency: 38kHz
+                code: !lambda 'return id(last_raw_data);'
+            # 异步执行脚本清除标志（不阻塞主循环）
+            - script.execute: clear_transmitting_flag
+          else:
+            - lambda: |-
+                ESP_LOGI("HEARTBEAT", "💓 System alive - Total IR signals: %d", id(total_signals_received));
+                
+                // 读取GPIO1的原始电平状态
+                int gpio_level = digitalRead(1);
+                ESP_LOGI("GPIO_DEBUG", "📌 GPIO1 (IR RX) level: %d (0=LOW/IR signal, 1=HIGH/idle)", gpio_level);
+  
+  # 每30秒输出统计信息
+  - interval: 30s
+    then:
+      - lambda: |-
+          if (id(total_signals_received) > 0) {
+            ESP_LOGI("STATS", "┌─────────────────────────────────────┐");
+            ESP_LOGI("STATS", "│       Statistics Report             │");
+            ESP_LOGI("STATS", "├─────────────────────────────────────┤");
+            ESP_LOGI("STATS", "│ Total Signals: %d", id(total_signals_received));
+            if (id(last_nec_address) != 0 || id(last_nec_command) != 0) {
+              ESP_LOGI("STATS", "│ Last NEC Addr: 0x%04X", id(last_nec_address));
+              ESP_LOGI("STATS", "│ Last NEC Cmd:  0x%04X", id(last_nec_command));
+            }
+            ESP_LOGI("STATS", "└─────────────────────────────────────┘");
+          } else {
+            ESP_LOGW("STATS", "⚠️  No IR signals received yet. Check hardware connection!");
+          }
+
+# 用户按钮用于手动触发发射（GPIO41）
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO41
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "User Button"
+    internal: true
+    on_press:
+      then:
+        - logger.log: "🔘 Button pressed - transmitting last NEC code..."
+        - button.press: transmit_last_nec
+
+# GPIO1状态监控传感器（用于调试）
+sensor:
+  - platform: template
+    name: "GPIO1 Digital Level"
+    id: gpio1_level
+    update_interval: 100ms  # 每100ms读取一次
+    lambda: |-
+      return digitalRead(1);
+    on_value:
+      then:
+        - lambda: |-
+            static int last_value = -1;
+            int current = (int)x;
+            if (current != last_value) {
+              if (current == 0) {
+                ESP_LOGI("GPIO1", "🔴 Level changed to LOW (IR active or pulled low)");
+              } else {
+                ESP_LOGI("GPIO1", "🟢 Level changed to HIGH (idle)");
+              }
+              last_value = current;
+            }

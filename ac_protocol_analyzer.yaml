@@ -1,0 +1,308 @@
+esphome:
+  name: ac-protocol-analyzer
+  friendly_name: AC Protocol Analyzer with IRremoteESP8266
+  comment: Universal A/C IR protocol analyzer supporting 50+ brands using IRremoteESP8266
+  libraries:
+    - "crankyoldgit/IRremoteESP8266@^2.8.6"
+  on_boot:
+    priority: -10
+    then:
+      - logger.log: 
+          format: "═══════════════════════════════════════════════════"
+          level: INFO
+      - logger.log:
+          format: "🚀 AC Protocol Analyzer Started (IRremoteESP8266)"
+          level: INFO  
+      - logger.log:
+          format: "📡 IR RX: GPIO1 | Supports 50+ A/C Brands"
+          level: INFO
+      - logger.log:
+          format: "═══════════════════════════════════════════════════"
+          level: INFO
+
+esp32:
+  board: m5stack-atoms3
+  variant: esp32s3
+  framework:
+    type: arduino
+    platform_version: 6.9.0
+
+# 日志配置 - USB CDC串口输出
+logger:
+  level: DEBUG
+  hardware_uart: USB_CDC
+  logs:
+    component: ERROR
+    sensor: INFO
+
+# 禁用WiFi - 纯本地运行
+wifi:
+  manual_ip:
+    static_ip: 192.168.1.99
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+  ssid: "dummy_ssid"
+  password: "dummy12345"
+  enable_on_boot: false
+
+# 全局变量存储统计信息
+globals:
+  - id: total_signals_received
+    type: int
+    initial_value: '0'
+  
+  # 协议统计（使用std::map存储协议名→计数）
+  - id: protocol_stats
+    type: std::map<std::string, int>
+    restore_value: false
+
+# 自定义组件：IRremoteESP8266接收器
+custom_component:
+  - lambda: |-
+      #include <IRremoteESP8266.h>
+      #include <IRrecv.h>
+      #include <IRac.h>
+      #include <IRutils.h>
+      
+      // 全局IRrecv对象（15KB缓冲区）
+      static IRrecv* irrecv = nullptr;
+      static IRAc ac(kGpioUnused);  // 只用于解析，不发送
+      
+      // 初始化接收器
+      auto setup_func = []() {
+        const uint16_t kRecvPin = 1;  // GPIO1
+        const uint16_t kCaptureBufferSize = 1024;  // 15KB缓冲区
+        const uint8_t kTimeout = 50;  // 50ms超时
+        const bool kUseModulation = true;
+        
+        irrecv = new IRrecv(kRecvPin, kCaptureBufferSize, kTimeout, kUseModulation);
+        irrecv->enableIRIn();  // 启动接收器，自动启用所有协议
+        
+        ESP_LOGI("IRremoteESP8266", "✅ Receiver initialized on GPIO1");
+        ESP_LOGI("IRremoteESP8266", "📊 Buffer: %d bytes | Timeout: %dms", kCaptureBufferSize, kTimeout);
+        ESP_LOGI("IRremoteESP8266", "🌐 All 50+ A/C protocols enabled for auto-detection");
+      };
+      
+      // 主循环：接收和解析IR信号
+      auto loop_func = []() {
+        static decode_results results;
+        
+        if (irrecv->decode(&results)) {
+          id(total_signals_received) += 1;
+          
+          // 获取协议名称
+          String protocol_name = typeToString(results.decode_type);
+          
+          // 更新协议统计
+          std::string proto_str = protocol_name.c_str();
+          id(protocol_stats)[proto_str]++;
+          
+          ESP_LOGI("IR-Detect", "╔══════════════════════════════════════════════════╗");
+          ESP_LOGI("IR-Detect", "║  Protocol: %-38s ║", protocol_name.c_str());
+          ESP_LOGI("IR-Detect", "╠══════════════════════════════════════════════════╣");
+          
+          // 输出原始十六进制数据
+          String hex_data = resultToHexidecimal(&results);
+          ESP_LOGI("IR-Detect", "║  Raw Data: %-38s ║", hex_data.c_str());
+          ESP_LOGI("IR-Detect", "║  Bits    : %-38d ║", results.bits);
+          
+          // 尝试解析为A/C协议
+          if (IRAc::isProtocolSupported(results.decode_type)) {
+            stdAc::state_t state;
+            if (IRAc::toCommon(&results, &state, nullptr)) {
+              ESP_LOGI("IR-Detect", "╠══════════════════════════════════════════════════╣");
+              ESP_LOGI("IR-Detect", "║            A/C Protocol Fields                   ║");
+              ESP_LOGI("IR-Detect", "╠══════════════════════════════════════════════════╣");
+              
+              // 只显示有意义的字段（值不为默认值）
+              
+              // 电源状态
+              if (state.power) {
+                ESP_LOGI("IR-Detect", "║  Power   : %-38s ║", state.power ? "ON" : "OFF");
+              }
+              
+              // 工作模式
+              if (state.mode != stdAc::opmode_t::kOff) {
+                const char* mode_str = "Unknown";
+                switch (state.mode) {
+                  case stdAc::opmode_t::kAuto: mode_str = "Auto"; break;
+                  case stdAc::opmode_t::kCool: mode_str = "Cool (制冷)"; break;
+                  case stdAc::opmode_t::kHeat: mode_str = "Heat (制热)"; break;
+                  case stdAc::opmode_t::kDry: mode_str = "Dry (除湿)"; break;
+                  case stdAc::opmode_t::kFan: mode_str = "Fan (送风)"; break;
+                  default: break;
+                }
+                ESP_LOGI("IR-Detect", "║  Mode    : %-38s ║", mode_str);
+              }
+              
+              // 温度设定
+              if (state.degrees > 0 && state.degrees < 50) {
+                ESP_LOGI("IR-Detect", "║  Temp    : %.1f°C                                  ║", state.degrees);
+              }
+              
+              // 风速
+              if (state.fanspeed != stdAc::fanspeed_t::kAuto) {
+                const char* fan_str = "Unknown";
+                switch (state.fanspeed) {
+                  case stdAc::fanspeed_t::kMin: fan_str = "Min (最低)"; break;
+                  case stdAc::fanspeed_t::kLow: fan_str = "Low (低速)"; break;
+                  case stdAc::fanspeed_t::kMedium: fan_str = "Medium (中速)"; break;
+                  case stdAc::fanspeed_t::kHigh: fan_str = "High (高速)"; break;
+                  case stdAc::fanspeed_t::kMax: fan_str = "Max (最高)"; break;
+                  case stdAc::fanspeed_t::kAuto: fan_str = "Auto (自动)"; break;
+                  default: break;
+                }
+                ESP_LOGI("IR-Detect", "║  Fan     : %-38s ║", fan_str);
+              }
+              
+              // 垂直摆风
+              if (state.swingv != stdAc::swingv_t::kOff) {
+                const char* swing_str = "Unknown";
+                switch (state.swingv) {
+                  case stdAc::swingv_t::kAuto: swing_str = "Auto (自动)"; break;
+                  case stdAc::swingv_t::kHighest: swing_str = "Highest (最高)"; break;
+                  case stdAc::swingv_t::kHigh: swing_str = "High (高)"; break;
+                  case stdAc::swingv_t::kMiddle: swing_str = "Middle (中)"; break;
+                  case stdAc::swingv_t::kLow: swing_str = "Low (低)"; break;
+                  case stdAc::swingv_t::kLowest: swing_str = "Lowest (最低)"; break;
+                  default: break;
+                }
+                ESP_LOGI("IR-Detect", "║  V-Swing : %-38s ║", swing_str);
+              }
+              
+              // 水平摆风
+              if (state.swingh != stdAc::swingh_t::kOff) {
+                const char* swingh_str = "Unknown";
+                switch (state.swingh) {
+                  case stdAc::swingh_t::kAuto: swingh_str = "Auto (自动)"; break;
+                  case stdAc::swingh_t::kLeftMax: swingh_str = "Left Max (最左)"; break;
+                  case stdAc::swingh_t::kLeft: swingh_str = "Left (左)"; break;
+                  case stdAc::swingh_t::kMiddle: swingh_str = "Middle (中)"; break;
+                  case stdAc::swingh_t::kRight: swingh_str = "Right (右)"; break;
+                  case stdAc::swingh_t::kRightMax: swingh_str = "Right Max (最右)"; break;
+                  default: break;
+                }
+                ESP_LOGI("IR-Detect", "║  H-Swing : %-38s ║", swingh_str);
+              }
+              
+              // 特殊功能
+              if (state.quiet) {
+                ESP_LOGI("IR-Detect", "║  Quiet   : Enabled (静音)                        ║");
+              }
+              if (state.turbo) {
+                ESP_LOGI("IR-Detect", "║  Turbo   : Enabled (强力)                        ║");
+              }
+              if (state.econo) {
+                ESP_LOGI("IR-Detect", "║  Econo   : Enabled (节能)                        ║");
+              }
+              if (state.light) {
+                ESP_LOGI("IR-Detect", "║  Light   : Enabled (显示灯)                      ║");
+              }
+              if (state.filter) {
+                ESP_LOGI("IR-Detect", "║  Filter  : Enabled (过滤器)                      ║");
+              }
+              if (state.clean) {
+                ESP_LOGI("IR-Detect", "║  Clean   : Enabled (清洁)                        ║");
+              }
+              if (state.beep) {
+                ESP_LOGI("IR-Detect", "║  Beep    : Enabled (蜂鸣)                        ║");
+              }
+              
+              // 睡眠模式
+              if (state.sleep >= 0) {
+                ESP_LOGI("IR-Detect", "║  Sleep   : %d minutes                             ║", state.sleep);
+              }
+            } else {
+              ESP_LOGI("IR-Detect", "║  ⚠️  A/C protocol detected but failed to parse   ║");
+            }
+          } else {
+            // 非A/C协议，输出原始时序数据
+            ESP_LOGI("IR-Detect", "╠══════════════════════════════════════════════════╣");
+            ESP_LOGI("IR-Detect", "║  ℹ️  Non-A/C Protocol - Raw Timing Data         ║");
+            ESP_LOGI("IR-Detect", "╠══════════════════════════════════════════════════╣");
+            
+            String timing_data = resultToTimingInfo(&results);
+            // 分行显示timing数据（每行最多48字符）
+            int start = 0;
+            while (start < timing_data.length()) {
+              String line = timing_data.substring(start, start + 48);
+              ESP_LOGI("IR-Detect", "║  %-48s ║", line.c_str());
+              start += 48;
+            }
+          }
+          
+          ESP_LOGI("IR-Detect", "╚══════════════════════════════════════════════════╝");
+          
+          // 准备接收下一个信号
+          irrecv->resume();
+        }
+      };
+      
+      // 注册到ESPHome
+      App.register_component(new Component());
+      App.setup_priority_init.push_back(setup_func);
+      App.loop_late.push_back(loop_func);
+      
+      return {};
+
+# 定时统计报告
+interval:
+  # 每30秒输出协议统计信息
+  - interval: 30s
+    then:
+      - lambda: |-
+          if (id(total_signals_received) > 0) {
+            ESP_LOGI("STATS", "╔════════════════════════════════════════════════════╗");
+            ESP_LOGI("STATS", "║          Protocol Statistics Report                ║");
+            ESP_LOGI("STATS", "╠════════════════════════════════════════════════════╣");
+            ESP_LOGI("STATS", "║  Total Signals Received: %-25d ║", id(total_signals_received));
+            ESP_LOGI("STATS", "╠════════════════════════════════════════════════════╣");
+            
+            // 将map转换为vector以便排序
+            std::vector<std::pair<std::string, int>> stats_vec;
+            for (const auto& pair : id(protocol_stats)) {
+              stats_vec.push_back(pair);
+            }
+            
+            // 按计数降序排序
+            std::sort(stats_vec.begin(), stats_vec.end(),
+                     [](const auto& a, const auto& b) { return a.second > b.second; });
+            
+            // 输出Top 10协议
+            ESP_LOGI("STATS", "║  Protocol Name                    │    Count       ║");
+            ESP_LOGI("STATS", "╠═══════════════════════════════════╪════════════════╣");
+            
+            int display_count = std::min(10, (int)stats_vec.size());
+            for (int i = 0; i < display_count; i++) {
+              ESP_LOGI("STATS", "║  %-33s │ %14d ║", 
+                      stats_vec[i].first.c_str(), stats_vec[i].second);
+            }
+            
+            if (stats_vec.size() > 10) {
+              ESP_LOGI("STATS", "║  ... and %d more protocols                         ║", 
+                      (int)stats_vec.size() - 10);
+            }
+            
+            ESP_LOGI("STATS", "╚════════════════════════════════════════════════════╝");
+          } else {
+            ESP_LOGW("STATS", "⚠️  No IR signals received yet. Check hardware connection!");
+          }
+
+# 用户按钮用于清除统计（GPIO41）
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO41
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "User Button"
+    internal: true
+    on_press:
+      then:
+        - lambda: |-
+            ESP_LOGI("BUTTON", "🔘 Button pressed - clearing statistics...");
+            id(total_signals_received) = 0;
+            id(protocol_stats).clear();
+            ESP_LOGI("BUTTON", "✅ Statistics cleared");

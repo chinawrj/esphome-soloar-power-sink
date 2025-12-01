@@ -1,0 +1,259 @@
+esphome:
+  name: ac-ir-analyzer
+  friendly_name: AC IR Analyzer with IRremoteESP8266
+  comment: Air conditioner IR protocol analyzer using IRremoteESP8266 library
+  platformio_options:
+    lib_deps:
+      - https://github.com/crankyoldgit/IRremoteESP8266.git  # Use master branch for Arduino v3.x compatibility
+    build_flags:
+      - -DDECODE_AC=true
+      - -DSEND_AC=true
+
+esp32:
+  board: m5stack-atoms3
+  variant: esp32s3
+  framework:
+    type: arduino
+    # Use recommended version for ESPHome compatibility
+
+# 日志配置 - USB CDC串口输出
+logger:
+  level: DEBUG
+  hardware_uart: USB_CDC
+  logs:
+    component: ERROR
+
+# 禁用WiFi - 纯本地运行
+wifi:
+  enable_on_boot: false
+  ap:
+    ssid: "AC-IR-Analyzer"
+    password: "irremote8266"
+
+# 全局变量存储协议统计
+globals:
+  - id: total_signals
+    type: int
+    initial_value: '0'
+  - id: protocol_stats
+    type: std::map<std::string, int>
+    restore_value: false
+
+# Lambda-based IR monitoring with IRremoteESP8266
+script:
+  - id: ir_receiver_loop
+    mode: queued
+    then:
+      - lambda: |-
+          #include <IRremoteESP8266.h>
+          #include <IRrecv.h>
+          #include <IRac.h>
+          #include <IRutils.h>
+          
+          static const uint16_t kRecvPin = 1;  // GPIO1
+          static const uint16_t kCaptureBufferSize = 1024;
+          static const uint8_t kTimeout = 50;
+          
+          static IRrecv *irrecv = nullptr;
+          static decode_results results;
+          
+          // Initialize receiver once
+          if (irrecv == nullptr) {
+            irrecv = new IRrecv(kRecvPin, kCaptureBufferSize, kTimeout, true);
+            irrecv->enableIRIn();
+            ESP_LOGI("IR-ANALYZER", "═══════════════════════════════════════════════════");
+            ESP_LOGI("IR-ANALYZER", "🚀 IRremoteESP8266 AC Protocol Analyzer Started");
+            ESP_LOGI("IR-ANALYZER", "📡 IR RX: GPIO1 | Supporting 50+ AC Protocols");
+            ESP_LOGI("IR-ANALYZER", "═══════════════════════════════════════════════════");
+          }
+          
+          // Check for IR data
+          if (irrecv->decode(&results)) {
+            id(total_signals)++;
+            
+            // 获取协议名称
+            String protocol = typeToString(results.decode_type);
+            
+            // 更新统计
+            std::string proto_str = protocol.c_str();
+            if (id(protocol_stats).find(proto_str) == id(protocol_stats).end()) {
+              id(protocol_stats)[proto_str] = 1;
+            } else {
+              id(protocol_stats)[proto_str]++;
+            }
+            
+            // 输出基础信息
+            ESP_LOGI("IR-DECODER", "╔══════════════════════════════════════════════════════════╗");
+            ESP_LOGI("IR-DECODER", "║  Protocol: %-45s ║", protocol.c_str());
+            ESP_LOGI("IR-DECODER", "║  Raw Data: %-45s ║", resultToHexidecimal(&results).c_str());
+            ESP_LOGI("IR-DECODER", "╠══════════════════════════════════════════════════════════╣");
+            
+            // 尝试解析为AC协议
+            stdAc::state_t state;
+            if (IRAc::isProtocolSupported(results.decode_type)) {
+              if (IRAc::toCommon(&results, &state, nullptr)) {
+                // 输出AC字段信息
+                ESP_LOGI("IR-DECODER", "║  🌡️  AC PROTOCOL FIELDS:                                ║");
+                
+                // 电源状态
+                if (state.power != -1) {
+                  ESP_LOGI("IR-DECODER", "║    Power     : %-38s ║", state.power ? "ON" : "OFF");
+                }
+                
+                // 工作模式
+                if (state.mode != stdAc::opmode_t::kOff) {
+                  const char* mode_str = "Unknown";
+                  switch (state.mode) {
+                    case stdAc::opmode_t::kAuto: mode_str = "Auto"; break;
+                    case stdAc::opmode_t::kCool: mode_str = "Cool"; break;
+                    case stdAc::opmode_t::kHeat: mode_str = "Heat"; break;
+                    case stdAc::opmode_t::kDry: mode_str = "Dry"; break;
+                    case stdAc::opmode_t::kFan: mode_str = "Fan"; break;
+                  }
+                  ESP_LOGI("IR-DECODER", "║    Mode      : %-38s ║", mode_str);
+                }
+                
+                // 温度
+                if (state.degrees > 0) {
+                  ESP_LOGI("IR-DECODER", "║    Temp      : %.1f°%-35s ║", 
+                           state.degrees, state.celsius ? "C" : "F");
+                }
+                
+                // 风速
+                if (state.fanspeed != stdAc::fanspeed_t::kAuto) {
+                  const char* fan_str = "Unknown";
+                  switch (state.fanspeed) {
+                    case stdAc::fanspeed_t::kMin: fan_str = "Min"; break;
+                    case stdAc::fanspeed_t::kLow: fan_str = "Low"; break;
+                    case stdAc::fanspeed_t::kMedium: fan_str = "Medium"; break;
+                    case stdAc::fanspeed_t::kHigh: fan_str = "High"; break;
+                    case stdAc::fanspeed_t::kMax: fan_str = "Max"; break;
+                    case stdAc::fanspeed_t::kAuto: fan_str = "Auto"; break;
+                  }
+                  ESP_LOGI("IR-DECODER", "║    Fan Speed : %-38s ║", fan_str);
+                }
+                
+                // 垂直摆风
+                if (state.swingv != stdAc::swingv_t::kOff) {
+                  const char* swing_str = "Unknown";
+                  switch (state.swingv) {
+                    case stdAc::swingv_t::kAuto: swing_str = "Auto"; break;
+                    case stdAc::swingv_t::kHighest: swing_str = "Highest"; break;
+                    case stdAc::swingv_t::kHigh: swing_str = "High"; break;
+                    case stdAc::swingv_t::kMiddle: swing_str = "Middle"; break;
+                    case stdAc::swingv_t::kLow: swing_str = "Low"; break;
+                    case stdAc::swingv_t::kLowest: swing_str = "Lowest"; break;
+                  }
+                  ESP_LOGI("IR-DECODER", "║    Swing V   : %-38s ║", swing_str);
+                }
+                
+                // 水平摆风
+                if (state.swingh != stdAc::swingh_t::kOff) {
+                  ESP_LOGI("IR-DECODER", "║    Swing H   : %-38s ║", 
+                           state.swingh == stdAc::swingh_t::kAuto ? "Auto" : "Manual");
+                }
+                
+                // 特殊模式
+                if (state.quiet) {
+                  ESP_LOGI("IR-DECODER", "║    Quiet     : %-38s ║", "ON");
+                }
+                if (state.turbo) {
+                  ESP_LOGI("IR-DECODER", "║    Turbo     : %-38s ║", "ON");
+                }
+                if (state.econo) {
+                  ESP_LOGI("IR-DECODER", "║    Econo     : %-38s ║", "ON");
+                }
+                if (state.light) {
+                  ESP_LOGI("IR-DECODER", "║    Light     : %-38s ║", "ON");
+                }
+                if (state.filter) {
+                  ESP_LOGI("IR-DECODER", "║    Filter    : %-38s ║", "ON");
+                }
+                if (state.clean) {
+                  ESP_LOGI("IR-DECODER", "║    Clean     : %-38s ║", "ON");
+                }
+                if (state.beep) {
+                  ESP_LOGI("IR-DECODER", "║    Beep      : %-38s ║", "ON");
+                }
+                if (state.sleep >= 0) {
+                  ESP_LOGI("IR-DECODER", "║    Sleep     : %-38d ║", state.sleep);
+                }
+              } else {
+                ESP_LOGI("IR-DECODER", "║  ⚠️  AC protocol but failed to parse fields            ║");
+              }
+            } else {
+              ESP_LOGI("IR-DECODER", "║  ℹ️  Non-AC protocol (TV/STB/etc)                      ║");
+            }
+            
+            ESP_LOGI("IR-DECODER", "╚══════════════════════════════════════════════════════════╝");
+            
+            // 输出原始时序数据（用于未知协议分析）
+            if (results.decode_type == decode_type_t::UNKNOWN) {
+              ESP_LOGI("IR-RAW", "╔══════════════════════════════════════════════════════════╗");
+              ESP_LOGI("IR-RAW", "║  UNKNOWN PROTOCOL - Raw Timing Data                      ║");
+              ESP_LOGI("IR-RAW", "╠══════════════════════════════════════════════════════════╣");
+              ESP_LOGI("IR-RAW", "║  Samples: %-46d ║", results.rawlen);
+              
+              // 输出前40个时序值
+              for (uint16_t i = 1; i < results.rawlen && i < 40; i += 2) {
+                if (i + 1 < results.rawlen) {
+                  ESP_LOGI("IR-RAW", "║  [%2d] Mark: %5d µs | Space: %5d µs                 ║", 
+                           i/2, results.rawbuf[i] * kRawTick, results.rawbuf[i+1] * kRawTick);
+                }
+              }
+              
+              // 分析引导码
+              if (results.rawlen > 2) {
+                uint32_t mark = results.rawbuf[1] * kRawTick;
+                uint32_t space = results.rawbuf[2] * kRawTick;
+                ESP_LOGI("IR-RAW", "╠══════════════════════════════════════════════════════════╣");
+                ESP_LOGI("IR-RAW", "║  Leader Code: [%5d µs, %5d µs]                      ║", mark, space);
+                
+                // 协议猜测
+                if (mark > 8000 && mark < 10000 && space > 4000 && space < 5000) {
+                  ESP_LOGI("IR-RAW", "║  Hint: Possibly NEC/Gree/Midea-like protocol             ║");
+                } else if (mark > 3000 && mark < 4000 && space > 1500 && space < 2000) {
+                  ESP_LOGI("IR-RAW", "║  Hint: Possibly Sony/Samsung-like protocol               ║");
+                }
+              }
+              
+              ESP_LOGI("IR-RAW", "╚══════════════════════════════════════════════════════════╝");
+            }
+            
+            irrecv->resume();
+          }
+
+# IR receiver continuous monitoring (runs in background) + Statistics reporting
+interval:
+  - interval: 10ms
+    then:
+      - script.execute: ir_receiver_loop
+  
+  - interval: 30s
+    then:
+      - lambda: |-
+          if (id(total_signals) > 0) {
+            ESP_LOGI("STATS", "╔══════════════════════════════════════════════════════════╗");
+            ESP_LOGI("STATS", "║          Protocol Statistics Report                      ║");
+            ESP_LOGI("STATS", "╠══════════════════════════════════════════════════════════╣");
+            ESP_LOGI("STATS", "║  Total Signals: %-41d ║", id(total_signals));
+            ESP_LOGI("STATS", "╠══════════════════════════════════════════════════════════╣");
+            
+            // 按计数排序并显示Top 10
+            std::vector<std::pair<std::string, int>> sorted_stats;
+            for (auto& pair : id(protocol_stats)) {
+              sorted_stats.push_back(pair);
+            }
+            std::sort(sorted_stats.begin(), sorted_stats.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            
+            int count = 0;
+            for (auto& pair : sorted_stats) {
+              if (count++ >= 10) break;
+              ESP_LOGI("STATS", "║  %-40s : %5d ║", pair.first.c_str(), pair.second);
+            }
+            
+            ESP_LOGI("STATS", "╚══════════════════════════════════════════════════════════╝");
+          } else {
+            ESP_LOGW("STATS", "⚠️  No IR signals received yet. Point remote at GPIO1 sensor!");
+          }
